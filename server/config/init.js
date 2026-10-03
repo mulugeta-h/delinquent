@@ -10,7 +10,7 @@ async function createDatabaseIfNotExists() {
   console.log("🔄 Checking PostgreSQL database...");
 
   if (!process.env.DLIST_DB_URL) {
-    throw new Error("❌ DLIST_DB_URL is not defined in .env");
+    throw new Error(" DLIST_DB_URL is not defined in .env");
   }
 
   const adminConnectionString = process.env.DLIST_DB_URL.replace(
@@ -159,6 +159,23 @@ async function init() {
         phone_numbers VARCHAR,
         email_addresses VARCHAR
     )
+    `);
+
+    // =====================================================
+    // AUDIT LOGS
+    // =====================================================
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INT REFERENCES users(id) ON DELETE SET NULL,
+        username VARCHAR(100),
+        action VARCHAR(50) NOT NULL,
+        table_name VARCHAR(100) NOT NULL,
+        record_id VARCHAR(255) NOT NULL,
+        details JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
     `);
 
 

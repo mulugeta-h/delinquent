@@ -17,21 +17,12 @@ const ALLOWED_EXTENSIONS = [".xml"];
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 const MAX_ROWS = 10_000_000;
 const CHUNK_SIZE = 3_500;
-const UPLOAD_DIR = path.join(__dirname, "..", "uploads");
 const TABLE = "uk_sanctions_list";
 
 // =========================================================
-// Multer
+// Multer (Memory Storage)
 // =========================================================
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname).toLowerCase()}`);
-  },
-});
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage,
@@ -86,8 +77,8 @@ const ensureArray = (v) => (v ? (Array.isArray(v) ? v : [v]) : []);
  * and
  *   <Designation>...</Designation>
  */
-function parseOfsiXml(filePath) {
-  const xml = fs.readFileSync(filePath, "utf8");
+function parseOfsiXml(fileBuffer) {
+  const xml = fileBuffer.toString("utf8");
 
   const parser = new XMLParser({
     ignoreAttributes: false,
@@ -185,8 +176,11 @@ async function bulkUpsert(client, records) {
 // =========================================================
 // GET /api/list/sanctions
 // =========================================================
-router.get("/all", async (_req, res) => {
+router.get("/all", async (req, res) => {
   try {
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const offset = parseInt(req.query.offset, 10) || 0;
+
     const pool = getDLPool();
     const { rows } = await pool.query(
       `SELECT
@@ -194,9 +188,10 @@ router.get("/all", async (_req, res) => {
          date_designated, last_updated
        FROM ${TABLE}
        ORDER BY unique_id
-       LIMIT 10000`
+       LIMIT $1 OFFSET $2`,
+       [limit, offset]
     );
-  // console.log("si , ",rows[0].sanctions_imposed);
+    // console.log("si , ",rows[0].sanctions_imposed);
     const data = rows.map((r) => {
       let primaryName = null;
       try {
@@ -222,11 +217,11 @@ router.get("/all", async (_req, res) => {
       } catch {
         primaryName = typeof r.names === "string" ? r.names : null;
       }
-//console.log("si , ",rows[0].sanctions_imposed);
+      //console.log("si , ",rows[0].sanctions_imposed);
       return {
         id: r.unique_id,
         name: primaryName,
-        sanctions_imposed: r.sanctions_imposed, 
+        sanctions_imposed: r.sanctions_imposed,
         designation_source: r.designation_source,
         regime: r.regime_name,
         date_designated: r.date_designated,
@@ -251,23 +246,14 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     return res.status(400).json({ success: false, message: "No file uploaded" });
   }
 
-  const filePath = req.file.path;
   const ext = path.extname(req.file.originalname).toLowerCase();
-
-  const cleanup = () => {
-    try {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch (e) {
-      console.warn("Failed to remove temp file:", filePath, e.message);
-    }
-  };
 
   try {
     if (!ALLOWED_EXTENSIONS.includes(ext)) {
       throw new Error(`Unsupported file type: ${ext}`);
     }
 
-    const designations = parseOfsiXml(filePath);
+    const designations = parseOfsiXml(req.file.buffer);
     if (designations.length === 0) throw new Error("No designations found in file");
 
     const records = [];
@@ -323,6 +309,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
     try {
       await client.query("BEGIN");
+      await client.query(`TRUNCATE TABLE ${TABLE} RESTART IDENTITY CASCADE`);
       inserted = await bulkUpsert(client, records);
       await client.query("COMMIT");
     } catch (dbErr) {
@@ -331,8 +318,6 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     } finally {
       client.release();
     }
-
-    cleanup();
 
     res.json({
       success: true,
@@ -343,7 +328,6 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     });
   } catch (err) {
     console.error("UK Sanctions upload error:", err.message);
-    cleanup();
     res.status(500).json({
       success: false,
       message: err.message || "Failed to process file",

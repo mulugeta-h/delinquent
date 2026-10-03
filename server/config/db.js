@@ -9,20 +9,16 @@ const libDLPool = new Pool({
 const connectDB = async () => {
   try {
     const result = await libDLPool.query("SELECT NOW()");
-
     console.log(
       "Connected to DLIST_DB:",
       result.rows[0].now.toString()
     );
   } catch (err) {
     console.error("DLIST DB ERROR:", err.message);
-
     setTimeout(connectDB, 5000);
   }
 };
-
 module.exports = {
   connectDB,
-
   getDLPool: () => libDLPool,
 };

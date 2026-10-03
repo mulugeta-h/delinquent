@@ -1,4 +1,3 @@
-// routes/internationalPepRoutes.js
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -11,14 +10,97 @@ const userAuth = require("../middleware/userAuth");
 router.use(userAuth);
 
 // =========================================================
-// Constants
+// Constants & Configuration
 // =========================================================
 const ALLOWED_EXTENSIONS = [".csv", ".xlsx"];
 const MAX_FILE_SIZE = 700 * 1024 * 1024; // 500 MB
 const MAX_ROWS = 10_000_000;
 const CHUNK_SIZE = 3_500;
-const TABLE = "international_pep";
-const TABLE_SANCTIONS = "uk_sanctions_list";
+
+const listConfig = {
+  blacklist: {
+    table: "black_list",
+    pk: "id",
+    columns: ["id", "name_of_suspected", "predicate_offence", "phone_no"],
+    expectedHeaders: [
+      ["id", "no", "sn", "s/n"],
+      ["name_of_suspected", "name", "suspect_name"],
+      ["predicate_offence", "offence", "crime"]
+    ],
+    extract: (get) => [
+      toStr(get("id", "no", "sn", "s/n")),
+      toStr(get("name_of_suspected", "name", "suspect_name")),
+      toStr(get("predicate_offence", "offence", "crime")),
+      toStr(get("phone_no", "phone", "contact", "phone no.")),
+    ],
+  },
+  deliquent: {
+    table: "deliquent_list",
+    pk: "no",
+    columns: ["no", "customer_name", "tin", "reference_no"],
+    expectedHeaders: [
+      ["no"],
+      ["customer_name", "customers_name", "name", "customer"],
+      ["tin", "tax_id"],
+      ["reference_no", "referance_no", "reference", "ref_no"]
+    ],
+    extract: (get) => [
+      toStr(get("no")),
+      toStr(get("customer_name", "customers_name", "name", "customer")),
+      toStr(get("tin", "tax_id")),
+      toStr(get("reference_no", "referance_no", "reference", "ref_no")),
+    ],
+  },
+  eth: {
+    table: "eth_list",
+    pk: "sn",
+    columns: ["sn", "name", "detail"],
+    expectedHeaders: [
+      ["sn", "s/n"],
+      ["name"],
+      ["detail", "details"]
+    ],
+    extract: (get) => [
+      toStr(get("sn", "s/n")),
+      toStr(get("name")),
+      toStr(get("detail", "details")),
+    ],
+  },
+  pep: {
+    table: "pep_list",
+    pk: "id",
+    columns: ["id", "nameeng", "nameamh", "position", "placeofassignment", "detail"],
+    expectedHeaders: [
+      ["id"],
+      ["nameeng", "name_eng", "english_name"],
+      ["nameamh", "name_amh", "amharic_name"]
+    ],
+    extract: (get) => [
+      toStr(get("id")),
+      toStr(get("nameeng", "name_eng", "english_name")),
+      toStr(get("nameamh", "name_amh", "amharic_name")),
+      toStr(get("position")),
+      toStr(get("placeofassignment", "place_of_assignment", "assignment")),
+      toStr(get("detail", "details")),
+    ],
+  },
+  pepadverser: {
+    table: "pep_adverser_list",
+    pk: "id",
+    columns: ["id", "name", "relation", "position"],
+    expectedHeaders: [
+      ["id"],
+      ["name"],
+      ["relation", "relationship"]
+    ],
+    extract: (get) => [
+      toStr(get("id")),
+      toStr(get("name")),
+      toStr(get("relation", "relationship")),
+      toStr(get("position")),
+    ],
+  },
+};
 
 // =========================================================
 // Multer (Memory Storage)
@@ -33,7 +115,7 @@ const upload = multer({
     if (!ALLOWED_EXTENSIONS.includes(ext)) {
       return cb(
         new Error(
-          `Only ${ALLOWED_EXTENSIONS.join(", ")} files are allowed for International PEP`
+          `Only ${ALLOWED_EXTENSIONS.join(", ")} files are allowed for this upload`
         )
       );
     }
@@ -54,19 +136,6 @@ const toStr = (v) => {
     }
   }
   return String(v).trim() || null;
-};
-
-const toDate = (v) => {
-  if (!v) return null;
-  const str = String(v).trim();
-  const parts = str.split(/[\/\-]/);
-  if (parts.length === 3 && parts[0].length <= 2 && parts[2].length === 4) {
-    const [d, m, y] = parts;
-    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  }
-  const dt = new Date(str);
-  if (!isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
-  return str;
 };
 
 const buildRowGetter = (row) => {
@@ -116,9 +185,14 @@ function parseSpreadsheet(fileBuffer, ext) {
   return rows;
 }
 
-async function bulkUpsert(client, records) {
-  const COLS = 16;
+async function bulkUpsert(client, config, records) {
+  const { table, pk, columns } = config;
+  const COLS = columns.length;
   let total = 0;
+
+  // Filter out the primary key from the columns to update
+  const updateCols = columns.filter(col => col !== pk);
+  const updateSet = updateCols.map(col => `${col} = EXCLUDED.${col}`).join(", ");
 
   for (let i = 0; i < records.length; i += CHUNK_SIZE) {
     const chunk = records.slice(i, i + CHUNK_SIZE);
@@ -136,90 +210,84 @@ async function bulkUpsert(client, records) {
     const flat = chunk.flat();
 
     const sql = `
-      INSERT INTO ${TABLE} (
-        id, schema, name, aliases, birth_date, countries, addresses,
-        identifiers, sanctions, phones, emails, program_id, dataset,
-        first_seen, last_seen, last_change
+      INSERT INTO ${table} (
+        ${columns.join(", ")}
       ) VALUES ${placeholders}
-      ON CONFLICT (id) DO UPDATE SET
-        schema       = EXCLUDED.schema,
-        name         = EXCLUDED.name,
-        aliases      = EXCLUDED.aliases,
-        birth_date   = EXCLUDED.birth_date,
-        countries    = EXCLUDED.countries,
-        addresses    = EXCLUDED.addresses,
-        identifiers  = EXCLUDED.identifiers,
-        sanctions    = EXCLUDED.sanctions,
-        phones       = EXCLUDED.phones,
-        emails       = EXCLUDED.emails,
-        program_id   = EXCLUDED.program_id,
-        dataset      = EXCLUDED.dataset,
-        first_seen   = EXCLUDED.first_seen,
-        last_seen    = EXCLUDED.last_seen,
-        last_change  = EXCLUDED.last_change
+      ON CONFLICT (${pk}) DO UPDATE SET
+        ${updateSet}
     `;
 
     const result = await client.query(sql, flat);
-    total += result.rowCount;
+    total += chunk.length;
   }
 
   return total;
 }
 
 // =========================================================
-// GET /api/list/pep
+// GET /api/list/local/:type
 // =========================================================
-router.get("/", async (req, res) => {
+router.get("/:type", async (req, res) => {
+  const { type } = req.params;
+  const config = listConfig[type];
+
+  if (!config) {
+    return res.status(400).json({ success: false, message: "Invalid list type" });
+  }
+
   try {
     const limit = parseInt(req.query.limit, 10) || 20;
     const offset = parseInt(req.query.offset, 10) || 0;
     const search = req.query.search;
 
     const pool = getDLPool();
-
-    let queryStr = `SELECT id, name, countries, birth_date, dataset, schema, last_seen, last_change FROM ${TABLE}`;
-    let countQueryStr = `SELECT COUNT(*) FROM ${TABLE}`;
+    let queryStr = `SELECT * FROM ${config.table}`;
+    let countQueryStr = `SELECT COUNT(*) FROM ${config.table}`;
     let params = [];
 
     if (search) {
+      const nameCol = config.table === 'black_list' ? 'name_of_suspected'
+        : config.table === 'deliquent_list' ? 'customer_name'
+          : config.table === 'pep_list' ? 'nameeng'
+            : 'name';
+
       const safeSearch = String(search).trim().replace(/[%_\\]/g, "\\$&");
-      queryStr += ` WHERE name ILIKE $1 OR aliases ILIKE $1`;
-      countQueryStr += ` WHERE name ILIKE $1 OR aliases ILIKE $1`;
+      queryStr += ` WHERE ${nameCol} ILIKE $1`;
+      countQueryStr += ` WHERE ${nameCol} ILIKE $1`;
       params.push(`%${safeSearch}%`);
     }
 
-    queryStr += ` ORDER BY id LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    queryStr += ` ORDER BY ${config.pk} ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(limit, offset);
 
     let countParams = search ? [`%${String(search).trim().replace(/[%_\\]/g, "\\$&")}%`] : [];
+
     const countRes = await pool.query(countQueryStr, countParams);
     const totalCount = parseInt(countRes.rows[0].count, 10);
 
+    console.log('offset are ', offset, 'limit are', limit, 'table is', config.table)
     const { rows } = await pool.query(queryStr, params);
 
-    const data = rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      position: null,
-      country: r.countries,
-      dateOfBirth: r.birth_date,
-      source: r.dataset || r.schema,
-      uploadedAt: r.last_seen || r.last_change,
-    }));
-
-    res.json({ success: true, count: totalCount, data });
+    res.json({ success: true, count: totalCount, data: rows });
   } catch (err) {
-    console.error("GET /api/list/pep error:", err);
+    console.error(`GET /api/list/local/${type} error:`, err);
     res
       .status(500)
-      .json({ success: false, message: "Failed to fetch PEP list" });
+      .json({ success: false, message: `Failed to fetch ${type} list` });
   }
 });
 
 // =========================================================
-// POST /api/list/pep/upload
+// POST /api/list/local/:type/upload
 // =========================================================
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/:type/upload", upload.single("file"), async (req, res) => {
+  const { type } = req.params;
+  const config = listConfig[type];
+
+  if (!config) {
+    return res.status(400).json({ success: false, message: "Invalid list type" });
+  }
+
   if (!req.file) {
     return res.status(400).json({ success: false, message: "No file uploaded" });
   }
@@ -227,62 +295,40 @@ router.post("/upload", upload.single("file"), async (req, res) => {
   const ext = path.extname(req.file.originalname).toLowerCase();
 
   try {
-    if (!ALLOWED_EXTENSIONS.includes(ext)) {
-      throw new Error(`Unsupported file type: ${ext}`);
-    }
-
     const rows = parseSpreadsheet(req.file.buffer, ext);
     if (rows.length === 0) throw new Error("No rows found in file");
 
-    const fileHeaders = Object.keys(rows[0]).map((k) => k.toLowerCase().replace(/[^a-z0-9]/g, ""));
-    const expectedHeaders = [
-      ["id", "unique_id", "uniqueid"],
-      ["name", "primaryname", "primary_name"]
-    ];
+    // Validate headers
+    const fileHeaders = Object.keys(rows[0]).map((k) =>
+      k.toLowerCase().replace(/[^a-z0-9]/g, "")
+    );
 
-    for (const synonyms of expectedHeaders) {
-      const normalizedSynonyms = synonyms.map((s) => s.toLowerCase().replace(/[^a-z0-9]/g, ""));
-      const found = fileHeaders.some((fh) => normalizedSynonyms.includes(fh));
-      if (!found) {
-        throw new Error(`Invalid file format. Missing required column (e.g., "${synonyms[0]}").`);
+    if (config.expectedHeaders) {
+      for (const synonyms of config.expectedHeaders) {
+        const normalizedSynonyms = synonyms.map((s) => s.toLowerCase().replace(/[^a-z0-9]/g, ""));
+        const found = fileHeaders.some((fh) => normalizedSynonyms.includes(fh));
+        if (!found) {
+          throw new Error(`Invalid file format. Missing required column (e.g., "${synonyms[0]}").`);
+        }
       }
     }
 
     const records = [];
-    let skipped = 0;
 
     for (const raw of rows) {
       const get = buildRowGetter(raw);
-      const id = toStr(get("id", "ID", "unique_id", "UniqueID"));
-      if (!id) {
-        skipped++;
+      const rowData = config.extract(get);
+
+      // Basic validation: skip row if all extracted fields are null
+      if (rowData.every(val => val === null)) {
         continue;
       }
 
-      records.push([
-        id,
-        toStr(get("schema", "Schema")),
-        toStr(get("name", "Name", "PrimaryName", "primary_name")),
-        toStr(get("aliases", "Aliases")),
-        toStr(get("birth_date", "BirthDate", "birthDate", "date_of_birth")),
-        toStr(get("countries", "Countries", "country")),
-        toStr(get("addresses", "Addresses", "address")),
-        toStr(get("identifiers", "Identifiers")),
-        toStr(get("sanctions", "Sanctions")),
-        toStr(get("phones", "Phones", "PhoneNumbers")),
-        toStr(get("emails", "Emails", "EmailAddresses")),
-        toStr(get("program_id", "ProgramID", "programId")),
-        toStr(get("dataset", "Dataset")),
-        toDate(get("first_seen", "FirstSeen", "DateDesignated")),
-        toDate(get("last_seen", "LastSeen", "LastUpdated")),
-        toDate(get("last_change", "LastChange")),
-      ]);
+      records.push(rowData);
     }
 
     if (records.length === 0) {
-      throw new Error(
-        `No valid rows to insert. Skipped ${skipped} row(s) missing required 'id'`
-      );
+      throw new Error(`No valid rows to insert.`);
     }
 
     const pool = getDLPool();
@@ -291,7 +337,8 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
     try {
       await client.query("BEGIN");
-      inserted = await bulkUpsert(client, records);
+
+      inserted = await bulkUpsert(client, config, records);
       await client.query("COMMIT");
     } catch (dbErr) {
       await client.query("ROLLBACK");
@@ -302,13 +349,12 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
     res.json({
       success: true,
-      message: `International PEP list updated: ${inserted} record(s)`,
+      message: `${type} list updated: ${inserted} record(s)`,
       recordsProcessed: inserted,
-      recordsSkipped: skipped,
       totalRows: rows.length,
     });
   } catch (err) {
-    console.error("PEP upload error:", err.message);
+    console.error(`${type} upload error:`, err.message);
     res.status(500).json({
       success: false,
       message: err.message || "Failed to process file",
@@ -317,20 +363,22 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 // =========================================================
-// PUT /api/list/pep/:id
+// PUT /api/list/local/:type/:id
 // =========================================================
-router.put("/:id", userAuth, async (req, res) => {
-  const { id } = req.params;
+router.put("/:type/:id", userAuth, async (req, res) => {
+  const { type, id } = req.params;
+  const config = listConfig[type];
+
+  if (!config) {
+    return res.status(400).json({ success: false, message: "Invalid list type" });
+  }
+
   const updateFields = req.body;
-  delete updateFields.id;
 
-  const allowedColumns = [
-    "schema", "name", "aliases", "birth_date", "countries", "addresses",
-    "identifiers", "sanctions", "phones", "emails", "program_id", "dataset",
-    "first_seen", "last_seen", "last_change"
-  ];
+  // Remove pk from update fields just in case
+  delete updateFields[config.pk];
 
-  const keys = Object.keys(updateFields).filter(key => allowedColumns.includes(key));
+  const keys = Object.keys(updateFields).filter(key => config.columns.includes(key));
   if (keys.length === 0) {
     return res.status(400).json({ success: false, message: "No valid fields provided for update" });
   }
@@ -343,15 +391,22 @@ router.put("/:id", userAuth, async (req, res) => {
     const pool = getDLPool();
 
     // Fetch existing record to get its name
-    const existingResult = await pool.query(`SELECT * FROM ${TABLE} WHERE id = $1`, [id]);
+    const existingResult = await pool.query(`SELECT * FROM ${config.table} WHERE ${config.pk} = $1`, [id]);
     if (existingResult.rowCount === 0) {
       return res.status(404).json({ success: false, message: "Record not found" });
     }
     const existingRecord = existingResult.rows[0];
-    const recordName = updateFields.name || existingRecord.name || "Unknown";
+
+    // Extract the name based on the table's specific name column
+    let recordName = existingRecord.name || existingRecord.name_of_suspected || existingRecord.customer_name || existingRecord.nameeng || "Unknown";
+    // Check if name is being updated
+    if (updateFields.name) recordName = updateFields.name;
+    if (updateFields.name_of_suspected) recordName = updateFields.name_of_suspected;
+    if (updateFields.customer_name) recordName = updateFields.customer_name;
+    if (updateFields.nameeng) recordName = updateFields.nameeng;
 
     const result = await pool.query(
-      `UPDATE ${TABLE} SET ${setClause} WHERE id = $${values.length}`,
+      `UPDATE ${config.table} SET ${setClause} WHERE ${config.pk} = $${values.length}`,
       values
     );
 
@@ -370,35 +425,40 @@ router.put("/:id", userAuth, async (req, res) => {
     await pool.query(
       `INSERT INTO audit_logs (user_id, username, action, table_name, record_id, details)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, username, "UPDATE", TABLE, id, JSON.stringify(auditDetails)]
+      [userId, username, "UPDATE", config.table, id, JSON.stringify(auditDetails)]
     );
 
     res.json({ success: true, message: "Record updated successfully" });
   } catch (err) {
-    console.error(`PUT /api/list/pep/${id} error:`, err);
-    res.status(500).json({ success: false, message: "Failed to update record" });
+    console.error(`PUT /api/list/local/${type}/${id} error:`, err);
+    res.status(500).json({ success: false, message: `Failed to update ${type} record` });
   }
 });
 
 // =========================================================
-// DELETE /api/list/pep/:id
+// DELETE /api/list/local/:type/:id
 // =========================================================
-router.delete("/:id", userAuth, async (req, res) => {
-  const { id } = req.params;
+router.delete("/:type/:id", userAuth, async (req, res) => {
+  const { type, id } = req.params;
+  const config = listConfig[type];
+
+  if (!config) {
+    return res.status(400).json({ success: false, message: "Invalid list type" });
+  }
 
   try {
     const pool = getDLPool();
 
     // Fetch existing record to get its name
-    const existingResult = await pool.query(`SELECT * FROM ${TABLE} WHERE id = $1`, [id]);
+    const existingResult = await pool.query(`SELECT * FROM ${config.table} WHERE ${config.pk} = $1`, [id]);
     if (existingResult.rowCount === 0) {
       return res.status(404).json({ success: false, message: "Record not found" });
     }
     const existingRecord = existingResult.rows[0];
-    const recordName = existingRecord.name || "Unknown";
+    const recordName = existingRecord.name || existingRecord.name_of_suspected || existingRecord.customer_name || existingRecord.nameeng || "Unknown";
 
     const result = await pool.query(
-      `DELETE FROM ${TABLE} WHERE id = $1`,
+      `DELETE FROM ${config.table} WHERE ${config.pk} = $1`,
       [id]
     );
 
@@ -417,67 +477,13 @@ router.delete("/:id", userAuth, async (req, res) => {
     await pool.query(
       `INSERT INTO audit_logs (user_id, username, action, table_name, record_id, details)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, username, "DELETE", TABLE, id, JSON.stringify(auditDetails)]
+      [userId, username, "DELETE", config.table, id, JSON.stringify(auditDetails)]
     );
 
     res.json({ success: true, message: "Record deleted successfully" });
   } catch (err) {
-    console.error(`DELETE /api/list/pep/${id} error:`, err);
-    res.status(500).json({ success: false, message: "Failed to delete record" });
-  }
-});
-
-// =========================================================
-// GET /api/list/pep/search?name=<query>
-// =========================================================
-// Searches BOTH international_pep and uk_sanctions_list by name.
-// Kept here so the frontend can call it under the same mounted router.
-// =========================================================
-router.get("/search", async (req, res) => {
-  const { name } = req.query;
-
-  if (!name || !name.trim()) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Please provide a name to search for" });
-  }
-
-  const searchTerm = `%${String(name).trim()}%`;
-
-  try {
-    const pool = getDLPool();
-
-    const [pepResult, sanctionsResult] = await Promise.all([
-      pool.query(
-        `
-        SELECT * 
-        FROM ${TABLE}
-        WHERE name ILIKE $1 OR aliases ILIKE $1
-        LIMIT 100
-        `,
-        [searchTerm]
-      ),
-      pool.query(
-        `
-        SELECT *
-        FROM ${TABLE_SANCTIONS}
-        WHERE names ILIKE $1 OR non_latin_names ILIKE $1
-        LIMIT 100
-        `,
-        [searchTerm]
-      ),
-    ]);
-
-    res.status(200).json({
-      success: true,
-      International_PEPs: pepResult.rows,
-      UK_Sanctions_List: sanctionsResult.rows,
-    });
-  } catch (err) {
-    console.error("Error searching data:", err);
-    res
-      .status(500)
-      .json({ success: false, error: "Internal server error during search" });
+    console.error(`DELETE /api/list/local/${type}/${id} error:`, err);
+    res.status(500).json({ success: false, message: `Failed to delete ${type} record` });
   }
 });
 

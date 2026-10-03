@@ -22,8 +22,8 @@ const router = express.Router();
 function signUserToken(user, mustChangePassword, sessionToken, deviceId) {
   return jwt.sign(
     {
-      id: user.id,   
-      name:user.name,              // ✅ PG FIX
+      id: user.id,
+      name: user.name,              // ✅ PG FIX
       username: user.username,
       role: user.role,
       mustChangePassword,

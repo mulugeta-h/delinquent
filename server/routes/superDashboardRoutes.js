@@ -1,19 +1,41 @@
+// routes/adminDashboardRoutes.js
 const express = require("express");
 const router = express.Router();
 const { getDLPool } = require("../config/db");
+const userAuth = require("../middleware/userAuth");
 
-const pool = getDLPool();
+router.use(userAuth);
 
-router.get("/dashboard", async (req, res) => {
+// =====================================================
+// GET /api/adminDashboard/stats
+// Returns 3 numbers only:
+//   - users count
+//   - pep count
+//   - sanctions count
+// =====================================================
+router.get("/stats", async (req, res) => {
   try {
-    // NEW CORE DATA
-    
+    const pool = getDLPool();
+
+    const [usersRes, pepRes, sanctionsRes] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS count FROM users`),
+      pool.query(`SELECT COUNT(*)::int AS count FROM international_pep`),
+      pool.query(`SELECT COUNT(*)::int AS count FROM uk_sanctions_list`),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        users: usersRes.rows[0].count,
+        pep: pepRes.rows[0].count,
+        sanctions: sanctionsRes.rows[0].count,
+      },
+    });
   } catch (err) {
-    console.error("Dashboard fetch error:", err);
+    console.error("❌ Admin dashboard error:", err);
     res.status(500).json({
       success: false,
-      message: "Dashboard fetch failed",
-      error: err.message,
+      message: "Failed to fetch dashboard data",
     });
   }
 });
